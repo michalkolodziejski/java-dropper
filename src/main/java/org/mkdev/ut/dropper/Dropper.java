@@ -1,6 +1,8 @@
 package org.mkdev.ut.dropper;
 
-import java.lang.annotation.Annotation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.lang.reflect.Method;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -13,14 +15,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class Dropper {
 
-    private ConcurrentHashMap<Method, VO> channelCount = new ConcurrentHashMap<>();
-    private final static boolean isDebug = false;
+    private static final Logger LOGGER = LoggerFactory.getLogger(Dropper.class);
 
-    private void monitor(String s) {
-        if (isDebug) {
-            System.out.println(s);
-        }
-    }
+    private ConcurrentHashMap<Method, VO> channelCount = new ConcurrentHashMap<>();
 
     public void releaseThread() throws DropCountExceededException {
         Method callingMethod = queryCallingMethod();
@@ -31,13 +28,13 @@ public class Dropper {
 
         channelCount.get(callingMethod).getThreadCount().decrementAndGet();
 
-        monitor("threads in queue: " + channelCount.get(callingMethod).getThreadCount().get());
+        LOGGER.debug("threads in queue: {}", channelCount.get(callingMethod).getThreadCount().get());
     }
 
     private Method queryCallingMethod() throws DropCountExceededException {
         Method callingMethod;
         try {
-            callingMethod = getCallingMethodWithAnnotation();
+            callingMethod = getCallingMethod();
         } catch (ClassNotFoundException e) {
             throw new DropCountExceededException("Calling class not found!");
         }
@@ -48,21 +45,20 @@ public class Dropper {
         return callingMethod;
     }
 
-    private Method getCallingMethodWithAnnotation() throws ClassNotFoundException {
+    private Method getCallingMethod() throws ClassNotFoundException {
         final Thread t = Thread.currentThread();
         final StackTraceElement[] stackTrace = t.getStackTrace();
+
+        String methodName = stackTrace[4].getMethodName();
 
         int i = 0;
         for (StackTraceElement stackTraceElement : stackTrace) {
             Class<?> clazz = Class.forName(stackTraceElement.getClassName());
 
             for (Method candidate : clazz.getDeclaredMethods()) {
-                for (Annotation annotation : candidate.getDeclaredAnnotations()) {
-                    if (annotation instanceof LimitRate) {
-                        monitor("--> [" + (i++) + "] " + stackTraceElement.getMethodName());
-
-                        return candidate;
-                    }
+                if (candidate.getName().equals(methodName)) {
+                    LOGGER.debug("--> [{}] {}", i++, stackTraceElement.getMethodName());
+                    return candidate;
                 }
             }
         }
@@ -70,11 +66,11 @@ public class Dropper {
         return null;
     }
 
-    public synchronized void checkThread(Callable workToDo, Callable callback) throws DropCountExceededException {
+    public synchronized void checkThread(Callable workToDo, Callable callback, Integer limitRate) throws DropCountExceededException {
 
         if (workToDo != null) {
             try {
-                this.checkThread(callback);
+                this.checkThread(null, callback, null);
 
                 workToDo.call();
 
@@ -86,14 +82,37 @@ public class Dropper {
 
             Method callingMethod = queryCallingMethod();
 
-            monitor("method =" + callingMethod + " :" + channelCount.containsKey(callingMethod));
+            LOGGER.debug("method = {} : {}", callingMethod, channelCount.containsKey(callingMethod));
 
-            if (!channelCount.containsKey(callingMethod)) {
-                channelCount.put(callingMethod, new VO(callingMethod.getAnnotation(LimitRate.class).value()));
+            Integer localLimitRate;
+
+            if (callingMethod.getAnnotation(LimitRate.class) != null) {
+                localLimitRate = callingMethod.getAnnotation(LimitRate.class).value();
+            } else {
+                if (callingMethod.getAnnotation(LimitRateProperty.class) != null) {
+                    String propertyName = callingMethod.getAnnotation(LimitRateProperty.class).name();
+
+                    localLimitRate = Integer.parseInt(System.getProperty(propertyName));
+                } else {
+                    localLimitRate = limitRate;
+                }
             }
 
-            monitor("[" + callingMethod + "] maxCount:" + channelCount.get(callingMethod).getMaxCount());
-            monitor("[" + callingMethod + "] threadCount:" + channelCount.get(callingMethod).getThreadCount());
+            if (localLimitRate == null) {
+                throw new DropCountExceededException("Could not evaluate LimitRate value!");
+            }
+
+            if (channelCount.containsKey(callingMethod)) {
+                if (channelCount.get(callingMethod).getMaxCount() != localLimitRate) {
+                    channelCount.remove(callingMethod);
+                    channelCount.put(callingMethod, new VO(localLimitRate));
+                }
+            } else {
+                channelCount.put(callingMethod, new VO(localLimitRate));
+            }
+
+            LOGGER.debug("[{}] maxCount:{}", callingMethod, channelCount.get(callingMethod).getMaxCount());
+            LOGGER.debug("[{}] threadCount:{}", callingMethod, channelCount.get(callingMethod).getThreadCount());
 
             if (channelCount.get(callingMethod).getThreadCount().get() < channelCount.get(callingMethod).getMaxCount()) {
                 channelCount.get(callingMethod).getThreadCount().incrementAndGet();
@@ -105,16 +124,6 @@ public class Dropper {
                 }
             }
         }
-    }
-
-    public synchronized void checkThread() throws DropCountExceededException {
-
-        this.checkThread(null);
-    }
-
-    public synchronized void checkThread(Callable callable) throws DropCountExceededException {
-
-        this.checkThread(null, callable);
     }
 
     private class VO {

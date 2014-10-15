@@ -54,6 +54,24 @@ public class DropperTest {
         }
     }
 
+    @Test
+    public void testCountWithinLimitWithoutAnnotation() throws Exception {
+        for(int i=0;i<5;i++) {
+            spawnThreadWithoutAnnotation(i);
+
+            Thread.sleep(500);
+        }
+    }
+
+    @Test(expected = DropCountExceededException.class)
+    public void testCountExceededWithoutAnnotation() throws Exception {
+        for(int i=0;i<7;i++) {
+            spawnThreadWithoutAnnotation(i);
+
+            Thread.sleep(50);
+        }
+    }
+
 
     private void spawnThread(final int i) {
         new Thread(new Runnable() {
@@ -81,9 +99,22 @@ public class DropperTest {
         }).start();
     }
 
+    private void spawnThreadWithoutAnnotation(final int i) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    doWorkWithoutAnnotation(i);
+                } catch (DropCountExceededException e) {
+                    e.printStackTrace();
+                }
+            }
+        }).start();
+    }
+
     @LimitRate(value = 5)
     private void doWork(int i) throws DropCountExceededException {
-        dropper.checkThread();
+        dropper.checkThread(null, null, null);
         System.out.println((i+1));
 
         try {
@@ -109,7 +140,20 @@ public class DropperTest {
                     e.printStackTrace();
                 }
             }
-        }, null);
+        }, null, null);
 
+    }
+
+    private void doWorkWithoutAnnotation(int i) throws DropCountExceededException {
+        dropper.checkThread(null, null, 5);
+        System.out.println((i+1));
+
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
+        dropper.releaseThread();
     }
 }
